@@ -38,6 +38,7 @@ struct Box {
 // Define n_rope rope particles and add one extra "mouse particle".
 const int MAX_PARTICLES = 20;
 const int MAX_SPRINGS = 20;
+const int MAX_BOXES = 20;
 const float BIRD_DIAMETER = 0.1;
 
 
