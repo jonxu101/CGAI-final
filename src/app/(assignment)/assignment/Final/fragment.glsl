@@ -26,14 +26,6 @@ struct Particle {
     bool is_fixed;
 };
 
-struct Box {
-    vec2 pos;
-    vec2 pos_prev;
-    vec2 dims;
-    vec2 vel;
-    float inv_mass;
-    bool is_fixed;
-};
 
 // Define n_rope rope particles and add one extra "mouse particle".
 const int MAX_PARTICLES = 20;
@@ -44,8 +36,8 @@ const float BIRD_DIAMETER = 0.1;
 
 // Simulation constants
 const float damp = 0.4;
-const float collision_dist = 0.2;
-const float ground_collision_dist = BIRD_DIAMETER / 2.;
+const float collision_dist = BIRD_DIAMETER;
+const float ground_collision_dist = BIRD_DIAMETER/2.;
 const vec2 gravity = vec2(0.0, -1);
 
 
@@ -54,8 +46,7 @@ const vec2 gravity = vec2(0.0, -1);
 int n_particles;
 Particle particles[MAX_PARTICLES];
 
-int n_boxes;
-Box boxes[MAX_BOXES];
+vec2 stand_movement = vec2(0.5, -.15);
 
 int nearest_particle(vec2 p) {
     int idx = 1;
@@ -321,126 +312,6 @@ vec2 collision_constraint_gradient(vec2 a, vec2 b, float collision_dist){
     }
 }
 
-float particle_to_box_collision_constraint(vec2 particle_pos, vec2 box_pos, vec2 box_dim, float box_rotation, float radius) {
-    // First, rotate the particle into the box's local space (unrotate the particle)
-    float cos_theta = cos(-box_rotation);
-    float sin_theta = sin(-box_rotation);
-    
-    // Translate to box-local coordinates
-    vec2 local_pos = particle_pos - box_pos;
-
-    // Rotate by inverse of box_rotation
-    vec2 rotated_pos = vec2(
-        local_pos.x * cos_theta - local_pos.y * sin_theta,
-        local_pos.x * sin_theta + local_pos.y * cos_theta
-    );
-
-    // The box is axis-aligned in local space, centered at (0,0)
-    vec2 half_dim = box_dim * 0.5;
-
-    // Find the closest point on the box in local space
-    vec2 closest_point = clamp(rotated_pos, -half_dim, half_dim);
-
-    // Compute the distance from particle to box
-    float dist = length(rotated_pos - closest_point);
-
-    if (dist <= radius) {
-        return radius - dist;
-    } else {
-        return 0.0;
-    }
-}
-
-vec2 particle_to_box_collision_constraint_gradient(vec2 particle_pos, vec2 box_pos, vec2 box_dim, float box_rotation, float collision_dist) {
-    // Rotate particle into box local frame (undo box rotation)
-    float cos_theta = cos(-box_rotation);
-    float sin_theta = sin(-box_rotation);
-
-    vec2 local_pos = particle_pos - box_pos;
-    vec2 rotated_pos = vec2(
-        local_pos.x * cos_theta - local_pos.y * sin_theta,
-        local_pos.x * sin_theta + local_pos.y * cos_theta
-    );
-
-    vec2 half_dim = box_dim * 0.5;
-    vec2 closest_point = clamp(rotated_pos, -half_dim, half_dim);
-
-    vec2 diff = rotated_pos - closest_point;
-    float dist = length(diff);
-
-    if (dist <= collision_dist && dist > 1e-6) {
-        // Normalize in local box frame
-        vec2 local_grad = diff / dist;
-
-        // Rotate gradient back into world space
-        float cos_theta_fwd = cos(box_rotation);
-        float sin_theta_fwd = sin(box_rotation);
-        vec2 world_grad = vec2(
-            local_grad.x * cos_theta_fwd - local_grad.y * sin_theta_fwd,
-            local_grad.x * sin_theta_fwd + local_grad.y * cos_theta_fwd
-        );
-
-        return world_grad;
-    } else {
-        return vec2(0.0, 0.0);
-    }
-}
-
-float box_to_box_collision_constraint(vec2 box1_pos, vec2 box1_dim, float box1_rotation, vec2 box2_pos, vec2 box2_dim, float box2_rotation) {
-     // Helper: compute box axes
-    vec2 axis1_x = vec2(cos(box1_rotation), sin(box1_rotation));
-    vec2 axis1_y = vec2(-sin(box1_rotation), cos(box1_rotation));
-    vec2 axis2_x = vec2(cos(box2_rotation), sin(box2_rotation));
-    vec2 axis2_y = vec2(-sin(box2_rotation), cos(box2_rotation));
-
-    vec2 half_dim1 = box1_dim * 0.5;
-    vec2 half_dim2 = box2_dim * 0.5;
-
-    // Helper function inside (GLSL doesn't allow nested functions, so inline it)
-    float min_overlap = 1e10; // large initial value
-
-    for (int axis_idx = 0; axis_idx < 4; axis_idx++) {
-        vec2 axis;
-        if (axis_idx == 0) axis = normalize(axis1_x);
-        else if (axis_idx == 1) axis = normalize(axis1_y);
-        else if (axis_idx == 2) axis = normalize(axis2_x);
-        else axis = normalize(axis2_y);
-
-        // Project box1 onto axis
-        float proj1[4];
-        proj1[0] = dot(box1_pos + axis1_x * half_dim1.x + axis1_y * half_dim1.y, axis);
-        proj1[1] = dot(box1_pos - axis1_x * half_dim1.x + axis1_y * half_dim1.y, axis);
-        proj1[2] = dot(box1_pos - axis1_x * half_dim1.x - axis1_y * half_dim1.y, axis);
-        proj1[3] = dot(box1_pos + axis1_x * half_dim1.x - axis1_y * half_dim1.y, axis);
-
-        float min1 = min(min(proj1[0], proj1[1]), min(proj1[2], proj1[3]));
-        float max1 = max(max(proj1[0], proj1[1]), max(proj1[2], proj1[3]));
-
-        // Project box2 onto axis
-        float proj2[4];
-        proj2[0] = dot(box2_pos + axis2_x * half_dim2.x + axis2_y * half_dim2.y, axis);
-        proj2[1] = dot(box2_pos - axis2_x * half_dim2.x + axis2_y * half_dim2.y, axis);
-        proj2[2] = dot(box2_pos - axis2_x * half_dim2.x - axis2_y * half_dim2.y, axis);
-        proj2[3] = dot(box2_pos + axis2_x * half_dim2.x - axis2_y * half_dim2.y, axis);
-
-        float min2 = min(min(proj2[0], proj2[1]), min(proj2[2], proj2[3]));
-        float max2 = max(max(proj2[0], proj2[1]), max(proj2[2], proj2[3]));
-
-        // Check for separation
-        if (max1 < min2 || max2 < min1) {
-            // There is a gap => no collision
-            return 0.0;
-        }
-
-        // Overlapping amount on this axis
-        float overlap = min(max1, max2) - max(min1, min2);
-        min_overlap = min(min_overlap, overlap);
-    }
-
-    // No separating axis found -> they are colliding
-    return min_overlap;
-}
-
 /////////////////////////////////////////////////////
 //// Step 2.3: Solving a single collision constraint
 //// It solves for the collision constraint between particle i and j.
@@ -475,6 +346,49 @@ float phi(vec2 p){
     // //let's do sin(x)+0.5
     // return p.y - (0.1 * sin(p.x * 2. * PI) - 0.5);
     return p.y + 0.65;
+}
+
+float stand(vec2 p) {
+    p = p - stand_movement;
+    vec2 b = vec2(0.01, 0.5);
+    vec2 d = abs(p)-b;
+    return length(max(d,0.0)) + min(max(d.x,d.y),0.0);
+}
+
+float rim(vec2 p) {
+    p = p - (stand_movement - vec2(0.12, -0.3));
+    vec2 b = vec2(0.12, 0.01);
+    vec2 d = abs(p)-b;
+    return length(max(d,0.0)) + min(max(d.x,d.y),0.0);
+}
+
+float rim_end_left(vec2 p) {
+    p = p - (stand_movement - vec2(0.24, -0.3));
+
+    return length(p);
+}
+
+float rim_end_right(vec2 p) {
+    p = p - (stand_movement - vec2(0.04, -0.3));
+
+    return length(p);
+}
+
+// https://www.shadertoy.com/view/stcfzn
+float sdSegment( in vec2 p, in vec2 a, in vec2 b )
+{
+    vec2 pa = p-a, ba = b-a;
+    float h = clamp( dot(pa,ba)/dot(ba,ba), 0.0, 1.0 );
+    return length( pa - ba*h );
+}
+
+float net(vec2 p) {
+    float left = sdSegment(p, stand_movement - vec2(0.24, -0.3), stand_movement - vec2(0.20, -0.24)) - 0.01;
+    float right = sdSegment(p, stand_movement - vec2(0.04, -0.3), stand_movement - vec2(0.08, -0.24)) - 0.01;
+    float middle = sdSegment(p, stand_movement - vec2(0.20, -0.24), stand_movement - vec2(0.08, -0.24)) - 0.01;
+
+    float s = min(min(left, right), middle);
+    return s;
 }
 
 /////////////////////////////////////////////////////
@@ -549,6 +463,101 @@ void solve_ground_constraint(int i, float ground_collision_dist, float dt){
     particles[i].pos += lambda * particles[i].inv_mass * grad;
 }
 
+
+float stand_constraint(vec2 p, float ground_collision_dist){
+    if(stand(p) < ground_collision_dist){
+        //// Your implementation starts
+        // return 0.0;
+        return stand(p) - ground_collision_dist;
+        //// Your implementation ends
+    }
+    else{
+        return 0.0;
+    }    
+}
+
+vec2 stand_constraint_gradient(vec2 p, float ground_collision_dist){
+    // Compute the gradient of the ground constraint with respect to p.
+    const float PI = 3.14159265359;
+
+    if(stand(p) < ground_collision_dist){
+        //// Your implementation starts
+
+        // return vec2(0.0);
+        // return -vec2(-0.1 * 2. * PI * cos(2. * PI * p.x), 1.0);
+        return -vec2(-1.0, 0.);
+        
+        //// Your implementation ends
+    }
+    else{
+        return vec2(0.0, 0.0);
+    }
+}
+
+void solve_stand_constraint(int i, float ground_collision_dist, float dt){
+    // Compute the ground constraint for particle i.
+    float numer = 0.0;
+    float denom = 0.0;
+
+    //// Your implementation starts
+    // vec2 grad = vec2(0.); // only keep for the sake of the compiler
+    numer = stand_constraint(particles[i].pos, ground_collision_dist);
+    vec2 grad = stand_constraint_gradient(particles[i].pos, ground_collision_dist);
+    denom = particles[i].inv_mass * length(grad) * length(grad);
+
+    //// Your implementation ends
+
+    //PBD if you comment out the following line, which is faster
+    denom += (1. / 1000.) / (dt * dt);
+
+    if (denom == 0.0) return;
+    float lambda = numer / denom;
+    particles[i].pos += lambda * particles[i].inv_mass * grad;
+}
+
+float rim_constraint(vec2 p, float ground_collision_dist){
+    if(rim_end_right(p) < ground_collision_dist){
+        return rim_end_right(p) - ground_collision_dist;
+    } else if (rim_end_left(p) < ground_collision_dist) {
+        return rim_end_left(p) - ground_collision_dist;
+    } else{
+        return 0.0;
+    }    
+}
+
+vec2 rim_constraint_gradient(vec2 p, float ground_collision_dist){
+    // Compute the gradient of the rim point constraint with respect to p.
+
+    if(rim_end_left(p) < ground_collision_dist){
+        return -(p - (stand_movement + vec2(-0.24, 0.3)));
+    } else if (rim_end_right(p) < ground_collision_dist) {
+        return -(p - (stand_movement + vec2(-0.04, 0.3)));
+    } else{
+        return vec2(0.0, 0.0);
+    }
+}
+
+void solve_rim_constraint(int i, float ground_collision_dist, float dt){
+    // Compute the ground constraint for particle i.
+    float numer = 0.0;
+    float denom = 0.0;
+
+    //// Your implementation starts
+    // vec2 grad = vec2(0.); // only keep for the sake of the compiler
+    numer = rim_constraint(particles[i].pos, ground_collision_dist);
+    vec2 grad = rim_constraint_gradient(particles[i].pos, ground_collision_dist);
+    grad = grad / (length(grad) + 1e-6);
+    denom = particles[i].inv_mass * length(grad) * length(grad);
+
+    //// Your implementation ends
+
+    //PBD if you comment out the following line, which is faster
+    denom += (1. / 1000.) / (dt * dt);
+
+    if (denom == 0.0) return;
+    float lambda = numer / denom;
+    particles[i].pos += lambda * particles[i].inv_mass * grad;
+}
 /////////////////////////////////////////////////////
 //// Step 10: Solving all constraints
 //// You need to solve for all 3 types of constraints using previously defined functions:
@@ -571,6 +580,12 @@ void solve_constraints(float dt) {
     }
     for (int i = 2; i < n_particles; i++) {
         solve_ground_constraint(i, ground_collision_dist, dt);
+    }
+    for (int i = 2; i < n_particles; i++) {
+        solve_stand_constraint(i, ground_collision_dist, dt);
+    }
+    for (int i = 2; i < n_particles; i++) {
+        solve_rim_constraint(i, ground_collision_dist, dt);
     }
     for (int i = 2; i < n_particles; i++) {
         for (int j = i + 1; j < n_particles; j++) {
@@ -598,6 +613,20 @@ vec3 render_scene(vec2 pixel_xy) {
     }
     else{
         col = vec3(229, 242, 250) / 255.; // background color
+    }
+
+    // render hoop    
+    phi = stand(pixel_xy);
+    if (phi < 0.0) {
+        col = vec3(0, 0, 0) / 255.;
+    }
+    phi = rim(pixel_xy);
+    if (phi < 0.0) {
+        col = vec3(0, 0, 0) / 255.;
+    }
+    phi = net(pixel_xy);
+    if (phi < 0.0) {
+        col = vec3(200,200,200) / 255.;
     }
     
     float pixel_size = 2.0 / iResolution.y;
@@ -686,12 +715,15 @@ void main() {
     int pixel_i = int(pixel_ij.x);
     int pixel_j = int(pixel_ij.y);
 
+    stand_movement += vec2(0.5*cos(0.5 * iTime), 0);
+
     if(is_initializing()){
         init_state();
     }
     else{
         load_state();
         if (pixel_j == 0) {
+
             if (pixel_i >= n_particles) return;
 
             float actual_dt = min(iTimeDelta, 0.02);
