@@ -24,6 +24,9 @@ struct Particle {
     vec2 vel;
     float inv_mass;
     bool is_fixed;
+    bool is_visible;
+    bool isDraggingBall;
+    bool isShot;
 };
 
 struct Box {
@@ -40,7 +43,7 @@ const int MAX_PARTICLES = 20;
 const int MAX_SPRINGS = 20;
 const int MAX_BOXES = 20;
 const float BIRD_DIAMETER = 0.1;
-
+const float SPRING_SHOT_RELEASE_DIST = 0.05;
 
 // Simulation constants
 const float damp = 0.4;
@@ -48,6 +51,11 @@ const float collision_dist = 0.2;
 const float ground_collision_dist = BIRD_DIAMETER / 2.;
 const vec2 gravity = vec2(0.0, -1);
 
+const vec2 INIT_BALL_LOCATION = vec2(-1.0, -0.4); 
+const float SPRING_STIFFNESS = 1.0 / 40.0;
+
+// bool isShot = false;
+// bool isDraggingBall = false;
 
 //0: mouse particle
 //1...5: rope particles
@@ -57,17 +65,11 @@ Particle particles[MAX_PARTICLES];
 int n_boxes;
 Box boxes[MAX_BOXES];
 
-int nearest_particle(vec2 p) {
-    int idx = 1;
-    float min_dist = 1e9;
-    for (int i = 1; i < n_particles; i++) {
-        float d = dist_sqr(p, particles[i].pos);
-        if (d < min_dist) {
-            min_dist = d;
-            idx = i;
-        }
+bool nearest_particle(vec2 p) {
+    if (length(p - particles[2].pos) < BIRD_DIAMETER / 2.) {
+        return true;
     }
-    return idx;
+    return false;
 }
 
 // ------------------------------------------------------------
@@ -89,12 +91,12 @@ Spring add_spring(int a, int b, float inv_stiffness){
     Spring s;
     s.a = a;
     s.b = b;
-    s.restLength = length(particles[a].pos - particles[b].pos);
+    s.restLength = 0.1;
     s.inv_stiffness = inv_stiffness;
     return s;
 }
 
-const int initial_particles = 6;
+const int initial_particles = 3;
 
 void init_state(void){
     n_particles = 3;
@@ -103,8 +105,9 @@ void init_state(void){
     //particle 0 is the mouse particle and will be set later
     particles[1].pos = vec2(-0.9, -0.2); 
     particles[1].vel = vec2(0.0);
-    particles[2].pos = vec2(-1.0, -0.3); 
+    particles[2].pos = INIT_BALL_LOCATION; 
     particles[2].vel = vec2(0.0);
+    particles[1].is_fixed = true;
     // particles[3].pos = vec2(-0, 0.5);
     // particles[3].vel = vec2(0.0);
     // particles[4].pos = vec2(0.3, 0.5);
@@ -116,7 +119,7 @@ void init_state(void){
 
     // Springs between adjacent rope particles
     //spring 0 is the mouse particle to the first rope particle
-    springs[1] = add_spring(1, 2, 1.0 / 100.0); // first to second rope particle
+    springs[1] = add_spring(1, 2, SPRING_STIFFNESS); // first to second rope particle
     // springs[2] = add_spring(2, 3, 1.0 / 100.0); // second to third rope particle
     // springs[3] = add_spring(3, 4, 1.0 / 100.0); // third to fourth rope particle
     // springs[4] = add_spring(4, 5, 1.0 / 100.0); // fourth to fifth rope particle
@@ -142,13 +145,13 @@ void load_state() {
     current_add_particle = int(data.w);
 
     //initialize mouse particle
-    {
-        int mouse_idx = 0;
-        particles[mouse_idx].pos = screen_to_xy(iMouse.xy);
-        particles[mouse_idx].vel = vec2(0.0);
-        particles[mouse_idx].inv_mass = 0.0; // fixed particle
-        particles[mouse_idx].is_fixed = true;
-    }
+    // {
+    //     int mouse_idx = 0;
+    //     particles[mouse_idx].pos = screen_to_xy(iMouse.xy);
+    //     particles[mouse_idx].vel = vec2(0.0);
+    //     particles[mouse_idx].inv_mass = 0.0; // fixed particle
+    //     particles[mouse_idx].is_fixed = true;
+    // }
     // Load other particles
     for (int i = 1; i < n_particles; i++) {
         vec4 data = texelFetch(iChannel0, ivec2(i, 0), 0);
@@ -161,23 +164,59 @@ void load_state() {
             particles[i].inv_mass = 0.0; // fixed particles at the ends of the rope
             particles[i].is_fixed = true; // make sure the first and last particles are fixed
         }
+        vec4 data_flags = texelFetch(iChannel0, ivec2(i, 2), 0);
+        particles[i].isDraggingBall = (data_flags.x > 0.5);
+        particles[i].isShot = (data_flags.y > 0.5);
     }
-
+    particles[1].is_fixed = true;
+    
     //select nearest particle to mouse
     if(iMouse.z == 1.){
-        if(selected_particle == -1){
-            selected_particle = nearest_particle(particles[0].pos);
+        if(!particles[2].isDraggingBall && !particles[2].isShot){
+            particles[2].isDraggingBall = nearest_particle(screen_to_xy(iMouse.xy));
+        }
+    } else if (iMouse.z == 0.) {
+        if (particles[2].isDraggingBall) {
+            particles[2].isDraggingBall = false;
+            particles[2].isShot = true;
         }
     }
-    else{
-        selected_particle = -1;
+
+    if (particles[2].isDraggingBall) {
+        particles[2].pos = vec2(screen_to_xy(iMouse.xy).x, max(-0.65 + BIRD_DIAMETER / 2., screen_to_xy(iMouse.xy).y));
+    }    
+
+    //load springs
+    // springs[0] = Spring(0, selected_particle, 0.0, 1.0 / 100.0); // mouse particle to first rope particle
+    for (int i = 1; i < n_springs; i++) {
+        vec4 data = texelFetch(iChannel0, ivec2(i, 1), 0);
+        springs[i].a = int(data.x);
+        springs[i].b = int(data.y);
+        springs[i].restLength = data.z;
+        springs[i].inv_stiffness = data.w;
+        if (particles[2].isShot) {
+            if (length(particles[springs[i].a].pos - particles[springs[i].b].pos) < SPRING_SHOT_RELEASE_DIST) {
+                n_springs = 1;
+            }
+        }
     }
-    
-    if(iMouse.z == 2.){
-        particles[current_add_particle].pos = screen_to_xy(iMouse.xy); // update the position of the selected particle
-        particles[current_add_particle].vel = vec2(0.0); // reset velocity to zero when mouse is released
-        particles[current_add_particle].inv_mass = 1.0; // make sure the selected particle is fixed
-        particles[current_add_particle].is_fixed = false; // make sure the selected particle is fixed
+
+    if(n_springs == 1){
+        // particles[current_add_particle].pos = particles[2].pos;
+        // particles[current_add_particle].vel = particles[2].vel;
+        // particles[current_add_particle].inv_mass = particles[2].inv_mass;
+        // particles[current_add_particle].is_fixed = particles[2].is_fixed;
+        // particles[current_add_particle].isDraggingBall = particles[2].isDraggingBall;
+        // particles[current_add_particle].isShot = particles[2].isShot;
+        particles[current_add_particle] = particles[2];
+        particles[2].pos = INIT_BALL_LOCATION; // update the position of the selected particle
+        particles[2].vel = vec2(0.0); // reset velocity to zero when mouse is released
+        particles[2].inv_mass = 1.0; // make sure the selected particle is fixed
+        particles[2].is_fixed = false; // make sure the selected particle is fixed
+        particles[2].isDraggingBall = false; // make sure the selected particle is fixed
+        particles[2].isShot = false; // make sure the selected particle is fixed
+        n_springs = 2;
+        springs[1] = add_spring(1, 2, SPRING_STIFFNESS); // first to second rope particle
         if(current_add_particle >= n_particles){
             // If we reach the maximum number of particles, reset to the first available index.
             n_particles = current_add_particle + 1; // skip the mouse particle at index 0
@@ -186,16 +225,6 @@ void load_state() {
         if(current_add_particle >= MAX_PARTICLES){
             current_add_particle = initial_particles;
         }
-    }
-
-    //load springs
-    springs[0] = Spring(0, selected_particle, 0.0, 1.0 / 100.0); // mouse particle to first rope particle
-    for (int i = 1; i < n_springs; i++) {
-        vec4 data = texelFetch(iChannel0, ivec2(i, 1), 0);
-        springs[i].a = int(data.x);
-        springs[i].b = int(data.y);
-        springs[i].restLength = data.z;
-        springs[i].inv_stiffness = data.w;
     }
 }
 
@@ -386,61 +415,6 @@ vec2 particle_to_box_collision_constraint_gradient(vec2 particle_pos, vec2 box_p
     }
 }
 
-float box_to_box_collision_constraint(vec2 box1_pos, vec2 box1_dim, float box1_rotation, vec2 box2_pos, vec2 box2_dim, float box2_rotation) {
-     // Helper: compute box axes
-    vec2 axis1_x = vec2(cos(box1_rotation), sin(box1_rotation));
-    vec2 axis1_y = vec2(-sin(box1_rotation), cos(box1_rotation));
-    vec2 axis2_x = vec2(cos(box2_rotation), sin(box2_rotation));
-    vec2 axis2_y = vec2(-sin(box2_rotation), cos(box2_rotation));
-
-    vec2 half_dim1 = box1_dim * 0.5;
-    vec2 half_dim2 = box2_dim * 0.5;
-
-    // Helper function inside (GLSL doesn't allow nested functions, so inline it)
-    float min_overlap = 1e10; // large initial value
-
-    for (int axis_idx = 0; axis_idx < 4; axis_idx++) {
-        vec2 axis;
-        if (axis_idx == 0) axis = normalize(axis1_x);
-        else if (axis_idx == 1) axis = normalize(axis1_y);
-        else if (axis_idx == 2) axis = normalize(axis2_x);
-        else axis = normalize(axis2_y);
-
-        // Project box1 onto axis
-        float proj1[4];
-        proj1[0] = dot(box1_pos + axis1_x * half_dim1.x + axis1_y * half_dim1.y, axis);
-        proj1[1] = dot(box1_pos - axis1_x * half_dim1.x + axis1_y * half_dim1.y, axis);
-        proj1[2] = dot(box1_pos - axis1_x * half_dim1.x - axis1_y * half_dim1.y, axis);
-        proj1[3] = dot(box1_pos + axis1_x * half_dim1.x - axis1_y * half_dim1.y, axis);
-
-        float min1 = min(min(proj1[0], proj1[1]), min(proj1[2], proj1[3]));
-        float max1 = max(max(proj1[0], proj1[1]), max(proj1[2], proj1[3]));
-
-        // Project box2 onto axis
-        float proj2[4];
-        proj2[0] = dot(box2_pos + axis2_x * half_dim2.x + axis2_y * half_dim2.y, axis);
-        proj2[1] = dot(box2_pos - axis2_x * half_dim2.x + axis2_y * half_dim2.y, axis);
-        proj2[2] = dot(box2_pos - axis2_x * half_dim2.x - axis2_y * half_dim2.y, axis);
-        proj2[3] = dot(box2_pos + axis2_x * half_dim2.x - axis2_y * half_dim2.y, axis);
-
-        float min2 = min(min(proj2[0], proj2[1]), min(proj2[2], proj2[3]));
-        float max2 = max(max(proj2[0], proj2[1]), max(proj2[2], proj2[3]));
-
-        // Check for separation
-        if (max1 < min2 || max2 < min1) {
-            // There is a gap => no collision
-            return 0.0;
-        }
-
-        // Overlapping amount on this axis
-        float overlap = min(max1, max2) - max(min1, min2);
-        min_overlap = min(min_overlap, overlap);
-    }
-
-    // No separating axis found -> they are colliding
-    return min_overlap;
-}
-
 /////////////////////////////////////////////////////
 //// Step 2.3: Solving a single collision constraint
 //// It solves for the collision constraint between particle i and j.
@@ -558,16 +532,18 @@ void solve_ground_constraint(int i, float ground_collision_dist, float dt){
 /////////////////////////////////////////////////////
 void solve_constraints(float dt) {
     //If left mouse is pressed, calculate the spring constraint for the mouse particle to the first rope particle.
-    if(iMouse.z == 1.){
-        solve_spring(springs[0], dt); // mouse particle to first rope particle
-    }
+    // if(iMouse.z == 1.){
+    //     solve_spring(springs[0], dt); // mouse particle to first rope particle
+    // }
 
     // Solve all constraints
 
     //// Your implementation starts
 
     for (int i = 1; i < n_springs; i++) {
-        solve_spring(springs[i], dt);
+        if (!particles[2].isDraggingBall) {
+            solve_spring(springs[i], dt);
+        }
     }
     for (int i = 2; i < n_particles; i++) {
         solve_ground_constraint(i, ground_collision_dist, dt);
@@ -588,6 +564,14 @@ float dist_to_segment(vec2 p, vec2 a, vec2 b) {
     float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
     // Return the distance from p to the closest point on the segment.
     return length(pa - h * ba);
+}
+
+float poleSdf(vec2 p) {
+    const vec2 dims = vec2(0.01, 0.225);
+    const vec2 center = vec2(-0.9, -0.425);
+    p = p - center;
+    vec2 d = abs(p) - dims;
+    return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0);
 }
 
 vec3 render_scene(vec2 pixel_xy) {
@@ -611,26 +595,26 @@ vec3 render_scene(vec2 pixel_xy) {
     {
         float min_dist = 1e9;
 
-        if(iMouse.z == 1.){
-            min_dist = dist_sqr(pixel_xy, particles[0].pos);
-        }
+        // if(iMouse.z == 1.){
+        //     min_dist = dist_sqr(pixel_xy, particles[0].pos);
+        // }
 
-        for (int i = 1; i < n_particles; i++){
+        for (int i = 2; i < n_particles; i++){
             min_dist = min(min_dist, dist_sqr(pixel_xy, particles[i].pos));
         }
         min_dist = sqrt(min_dist);
 
         const float radius = BIRD_DIAMETER / 2.;
-        col = mix(col, vec3(180, 164, 105) / 255., remap01(min_dist, radius, radius - pixel_size));
+        col = mix(col, vec3(229, 95, 32) / 255., remap01(min_dist, radius, radius - pixel_size));
     }
     
     // Render All springs
     {
         float min_dist = 1e9;
 
-        if(iMouse.z == 1.){
-            min_dist = dist_to_segment(pixel_xy, particles[0].pos, particles[selected_particle].pos);
-        }
+        // if(iMouse.z == 1.){
+        //     min_dist = dist_to_segment(pixel_xy, particles[0].pos, particles[selected_particle].pos);
+        // }
 
         for (int i = 1; i < n_springs; i++) {
             int a = springs[i].a;
@@ -642,6 +626,12 @@ vec3 render_scene(vec2 pixel_xy) {
         
         col = mix(col, vec3(14, 105, 146) / 255., 0.25 * remap01(min_dist, thickness, thickness - pixel_size));
     }
+    
+    // Render slingshot pole
+    if (poleSdf(pixel_xy) < 0.0) {
+        col =  vec3(0., 0., 0.) / 255.;
+    }
+
 
     // col.z = 1.0;
     return col;
@@ -671,6 +661,13 @@ vec4 output_color(vec2 pixel_ij){
         else{
             return vec4(0.0, 0.0, 0.0, 1.0);
         }
+    } else if (j == 2) {
+        if (i < n_particles) {
+            float dragging = particles[i].isDraggingBall ? 1.0 : 0.0;
+            float shot = particles[i].isShot ? 1.0 : 0.0;
+            return vec4(dragging, shot, 0.0, 1.0);
+        }
+        return vec4(0.0);
     }
     else{
         vec2 pixel_xy = screen_to_xy(pixel_ij);
@@ -701,9 +698,13 @@ void main() {
             for (int i = 0; i < n_steps; i++) {
                 // Update rope particles only; skip updating the mouse particle since it's fixed.
                 for (int j = 0; j < n_particles; j++) {
-                    if (!particles[j].is_fixed)
-                        particles[j].vel += dt * gravity;
-                    particles[j].vel *= exp(-damp * dt);
+                    if (!particles[j].is_fixed) {
+                        if (j != 2) {
+                            particles[j].vel += dt * gravity;
+                            particles[j].vel *= exp(-damp * dt);
+                        }
+                    }
+                    // particles[j].vel *= exp(-damp * dt);
                     particles[j].pos_prev = particles[j].pos;
                     particles[j].pos += dt * particles[j].vel;
                 }
@@ -711,7 +712,20 @@ void main() {
                 // Update velocities for rope particles only.
                 for (int j = 0; j < n_particles; j++) {
                     if (!particles[j].is_fixed){
-                        particles[j].vel = (particles[j].pos - particles[j].pos_prev) / dt;
+                        if (j == 2 && !particles[2].isShot) {
+                            continue;
+                        }
+                        if (j != 2) {
+                            particles[j].vel = (particles[j].pos - particles[j].pos_prev) / dt;
+                            continue;
+                        }
+                        vec2 prevVel = particles[j].vel;
+                        vec2 nextVel = (particles[j].pos - particles[j].pos_prev) / dt;
+                        if (length(prevVel) > 0.0 && (length(prevVel) > length(nextVel))) {
+                            n_springs = 1;
+                            continue;
+                        }
+                        particles[j].vel = nextVel;
                     }
                 }
                 // Keep the mouse particle fixed by reassigning its position each step.
